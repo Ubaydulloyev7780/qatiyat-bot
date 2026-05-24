@@ -2,15 +2,18 @@
 import os
 import json
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    ContextTypes, JobQueue
+    ContextTypes,
 )
 
 TOKEN = os.environ.get("BOT_TOKEN", "8912448991:AAGTLDeCWVMoEhCiO4DTFwbzmF989BDxETo")
 DATA_FILE = "user_data.json"
+PORT = int(os.environ.get("PORT", 8080))
 
 TASKS = [
     {"id": "namoz", "emoji": "🕌", "text": "Bomdod namozi o'qidim"},
@@ -36,7 +39,7 @@ MORNING_MOTIVATIONS = [
     "Namoz — kuchning manbai. Sport — tanning quvvati. Ish — ertangning poydevori. Davom et! 🌅",
     "Bugun malyar ishiga boring, har bir so'm qarzingni kamaytiradi. Oldinga! 💰",
     "Prop shot orzuing bor — bugun o'sha orzuga bir qadam yaqinlash! 📈",
-    "Oilang sening kuchingni kutmoqda. Bugun ularuchun ishlaysiz! ❤️",
+    "Oilang sening kuchingni kutmoqda. Bugun ular uchun ishlaysiz! ❤️",
     "Bir kun o'tdi — buni o'zgartira olmaysan. Bugunni — o'zgartirishingiz mumkin! ⚡",
 ]
 
@@ -48,6 +51,19 @@ EVENING_MOTIVATIONS = [
     "40 kun — bu bir umr emas. Lekin bu 40 kun umringni o'zgartiradi! 🔥",
     "Charchagan bo'lsang ham — ertaga bomdodga tur. O'sha bitta qadam hamma narsani boshlaydi! 🌟",
 ]
+
+# Simple HTTP server for Render port check
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Qatiyat Bot is running!")
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
 
 def load_data():
     try:
@@ -97,12 +113,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = get_user(data, update.effective_user.id)
     user["chat_id"] = update.effective_chat.id
     save_data(data)
-
     await update.message.reply_text(
         "🌟 *Assalomu alaykum! Qat'iyat Botiga xush kelibsiz!*\n\n"
         "Bu bot sizning 40 kunlik o'zgarish yo'lingizda yordamchi bo'ladi.\n\n"
         "📋 *Maqsadlaringiz:*\n" + "\n".join(GOALS) + "\n\n"
-        "Har kuni vazifalarni belgilang, motivatsiya oling, progressing kuzating!\n\n"
         "👇 Menyuni ko'rish uchun /menu bosing",
         parse_mode="Markdown"
     )
@@ -166,8 +180,9 @@ async def show_tasks(query, user, data):
     key = today_key()
     today = user["days"].get(key, {})
     done_count = sum(1 for t in TASKS if today.get(t["id"]))
-
-    text = f"✅ *{day_num}-kun — Bugungi vazifalar:*\n\n"
+    text = f"✅ *{day_num}-kun — Bugungi vazifalar:*\n\nBajarildi: *{done_count}/{len(TASKS)}*\n"
+    if done_count == len(TASKS):
+        text += "\n🎉 Zo'r! Bugun barchasi bajarildi!"
     keyboard = []
     for t in TASKS:
         done = today.get(t["id"], False)
@@ -176,11 +191,6 @@ async def show_tasks(query, user, data):
             f"{check} {t['emoji']} {t['text']}",
             callback_data=f"toggle_{t['id']}"
         )])
-    
-    text += f"Bajarildi: *{done_count}/{len(TASKS)}*\n"
-    if done_count == len(TASKS):
-        text += "\n🎉 Zo'r! Bugun barchasi bajarildi!"
-    
     keyboard.append([InlineKeyboardButton("🔙 Menyu", callback_data="menu")])
     await query.edit_message_text(
         text, parse_mode="Markdown",
@@ -191,7 +201,6 @@ async def show_tasks(query, user, data):
 async def show_progress(query, user):
     day_num = get_day_num(user)
     streak = get_streak(user)
-    
     total_done = 0
     full_days = 0
     for key, day_data in user["days"].items():
@@ -199,56 +208,35 @@ async def show_progress(query, user):
         total_done += cnt
         if cnt >= len(TASKS):
             full_days += 1
-
     pct = round((day_num - 1) / 40 * 100)
     bar_filled = int(pct / 10)
     bar = "🟩" * bar_filled + "⬜" * (10 - bar_filled)
-
     text = (
         f"📊 *Sizning progressingiz:*\n\n"
         f"📅 Kun: *{day_num}/40*\n"
         f"🔥 Ketma-ket: *{streak} kun*\n"
         f"⭐ To'liq kunlar: *{full_days}*\n"
         f"✅ Jami vazifa: *{total_done}*\n\n"
-        f"*40 kunlik yo'l:*\n{bar} {pct}%\n\n"
+        f"*40 kunlik yo'l:*\n{bar} {pct}%\n"
     )
-    
-    if day_num <= 10:
-        text += "💪 Boshlanish — eng qiyin qadamdir. Davom et!"
-    elif day_num <= 20:
-        text += "🚀 Yarim yo'lga yaqinlashmoqda! Zo'r ketmoqda!"
-    elif day_num <= 35:
-        text += "🔥 Finish chizig'i ko'rinmoqda! To'xtama!"
-    else:
-        text += "🏆 Oxirgi kunlar! Sen g'olibsan!"
-
     keyboard = [[InlineKeyboardButton("🔙 Menyu", callback_data="menu")]]
-    await query.edit_message_text(
-        text, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_goals(query):
-    text = "🎯 *40 kunlik maqsadlaringiz:*\n\n"
-    text += "\n".join(GOALS)
-    text += "\n\n💡 Har kuni shu maqsadlarni eslab turing!"
+    text = "🎯 *40 kunlik maqsadlaringiz:*\n\n" + "\n".join(GOALS) + "\n\n💡 Har kuni shu maqsadlarni eslab turing!"
     keyboard = [[InlineKeyboardButton("🔙 Menyu", callback_data="menu")]]
-    await query.edit_message_text(
-        text, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_motivation(query):
     import random
-    all_quotes = MORNING_MOTIVATIONS + EVENING_MOTIVATIONS
-    quote = random.choice(all_quotes)
-    text = f"💪 *Motivatsiya:*\n\n{quote}"
+    quote = random.choice(MORNING_MOTIVATIONS + EVENING_MOTIVATIONS)
     keyboard = [
         [InlineKeyboardButton("🔄 Yana bittasi", callback_data="motivate")],
         [InlineKeyboardButton("🔙 Menyu", callback_data="menu")],
     ]
     await query.edit_message_text(
-        text, parse_mode="Markdown",
+        f"💪 *Motivatsiya:*\n\n{quote}",
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -261,12 +249,7 @@ async def show_journey(query, user):
         d = user["days"].get(key_d, {})
         cnt = sum(1 for t in TASKS if d.get(t["id"]))
         if i < day_num:
-            if cnt >= len(TASKS):
-                line += "🟩"
-            elif cnt > 0:
-                line += "🟨"
-            else:
-                line += "🟥"
+            line += "🟩" if cnt >= len(TASKS) else ("🟨" if cnt > 0 else "🟥")
         elif i == day_num:
             line += "⭐"
         else:
@@ -274,75 +257,71 @@ async def show_journey(query, user):
         if i % 10 == 0:
             text += line + f" ({i})\n"
             line = ""
-    
     text += "\n🟩 To'liq  🟨 Qisman  🟥 O'tkazib  ⭐ Bugun  ⬜ Kelasi"
     keyboard = [[InlineKeyboardButton("🔙 Menyu", callback_data="menu")]]
-    await query.edit_message_text(
-        text, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def send_morning_motivation(ctx: ContextTypes.DEFAULT_TYPE):
+async def send_scheduled_messages(app):
     import random
-    data = load_data()
-    quote = random.choice(MORNING_MOTIVATIONS)
-    for uid, user in data.items():
-        chat_id = user.get("chat_id")
-        if not chat_id:
-            continue
-        day_num = get_day_num(user)
-        keyboard = [[InlineKeyboardButton("✅ Vazifalarni ko'rish", callback_data="tasks")]]
-        try:
-            await ctx.bot.send_message(
-                chat_id=chat_id,
-                text=f"🌅 *Xayrli tong! {day_num}-kun boshlandi!*\n\n{quote}\n\n👇 Bugungi vazifalaringiz:",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except:
-            pass
+    while True:
+        now = datetime.now()
+        # Ertalab 6:00 (UTC+5 = 1:00 UTC)
+        if now.hour == 1 and now.minute == 0:
+            data = load_data()
+            quote = random.choice(MORNING_MOTIVATIONS)
+            for uid, user in data.items():
+                chat_id = user.get("chat_id")
+                if not chat_id:
+                    continue
+                day_num = get_day_num(user)
+                try:
+                    keyboard = [[InlineKeyboardButton("✅ Vazifalarni ko'rish", callback_data="tasks")]]
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🌅 *Xayrli tong! {day_num}-kun boshlandi!*\n\n{quote}",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                except:
+                    pass
+        # Kechqurun 21:00 (UTC+5 = 16:00 UTC)
+        elif now.hour == 16 and now.minute == 0:
+            data = load_data()
+            quote = random.choice(EVENING_MOTIVATIONS)
+            for uid, user in data.items():
+                chat_id = user.get("chat_id")
+                if not chat_id:
+                    continue
+                key = today_key()
+                today = user["days"].get(key, {})
+                done_count = sum(1 for t in TASKS if today.get(t["id"]))
+                try:
+                    keyboard = [[InlineKeyboardButton("📊 Progressimni ko'rish", callback_data="progress")]]
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🌙 *Kechqurun salom!*\n\n{quote}\n\n✅ Bugun: *{done_count}/{len(TASKS)}* vazifa.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                except:
+                    pass
+        await asyncio.sleep(60)
 
-async def send_evening_motivation(ctx: ContextTypes.DEFAULT_TYPE):
-    import random
-    data = load_data()
-    quote = random.choice(EVENING_MOTIVATIONS)
-    for uid, user in data.items():
-        chat_id = user.get("chat_id")
-        if not chat_id:
-            continue
-        key = today_key()
-        today = user["days"].get(key, {})
-        done_count = sum(1 for t in TASKS if today.get(t["id"]))
-        keyboard = [[InlineKeyboardButton("📊 Progressimni ko'rish", callback_data="progress")]]
-        try:
-            await ctx.bot.send_message(
-                chat_id=chat_id,
-                text=f"🌙 *Kechqurun salom!*\n\n{quote}\n\n✅ Bugun: *{done_count}/{len(TASKS)}* vazifa bajarildi.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except:
-            pass
-
-def main():
+async def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Ertalab soat 6:00 (UTC+5 = 1:00 UTC)
-    app.job_queue.run_daily(
-        send_morning_motivation,
-        time=datetime.strptime("01:00", "%H:%M").time()
-    )
-    # Kechqurun soat 21:00 (UTC+5 = 16:00 UTC)
-    app.job_queue.run_daily(
-        send_evening_motivation,
-        time=datetime.strptime("16:00", "%H:%M").time()
-    )
-
+    # Health server alohida threadda
+    t = threading.Thread(target=run_health_server, daemon=True)
+    t.start()
     print("Bot ishga tushdi...")
-    app.run_polling()
+
+    async with app:
+        await app.start()
+        await app.updater.start_polling()
+        await send_scheduled_messages(app)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
